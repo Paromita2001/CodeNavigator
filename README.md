@@ -82,14 +82,6 @@ Why this approach was selected:
 
 ---
 
-## Challenges Faced
-
-### Windows File Permission Issues
-During development, deleting cloned repositories caused Windows file-locking errors because Streamlit and Git processes kept some `.git` files open.
-
-### Solution
-Instead of reusing a fixed repository folder, dynamic repository folders were created using timestamps.
-
 ---
 
 ### Package & Environment Issues
