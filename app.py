@@ -1,7 +1,3 @@
-
-import os
-os.environ["STREAMLIT_WATCHER_TYPE"] = "none"
-
 import streamlit as st
 import time
 import os
@@ -10,8 +6,9 @@ from ingestion.clone_repo import clone_repo
 from ingestion.file_reader import read_code_files
 from indexing.chunker import chunk_files
 from indexing.embeddings import get_embeddings
-from indexing.vector_store import build_index, save_index, load_index
+from indexing.vector_store import build_index, save_index
 from query.search import search_index
+from query.answer import synthesize_answer
 
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(page_title="CodeNavigator", page_icon="🔍", layout="wide")
@@ -23,6 +20,10 @@ if "indexed" not in st.session_state:
     st.session_state.indexed = False
 if "chunks" not in st.session_state:
     st.session_state.chunks = []
+if "index" not in st.session_state:
+    st.session_state.index = None
+if "clone_path" not in st.session_state:
+    st.session_state.clone_path = None
 
 # ── Sidebar: Repository Input ─────────────────────────────────────────────────
 with st.sidebar:
@@ -31,24 +32,15 @@ with st.sidebar:
                              placeholder="https://github.com/user/repo")
     index_btn = st.button("Clone & Index Repository", type="primary")
 
-    # if st.session_state.indexed:
-    #     st.success(f" Indexed {len(st.session_state.chunks)} chunks")
-    #     if st.button(" Clear & Reset"):
-    #         st.session_state.indexed = False
-    #         st.session_state.chunks = []
-    #         # if os.path.exists("data/repo"):
-    #         #     shutil.rmtree("data/repo")
-
-
-    #         if os.path.exists("data"):
-    #             shutil.rmtree("data")
-
-    #         if os.path.exists("data/index.faiss"):
-    #             os.remove("data/index.faiss")
-    #         if os.path.exists("data/chunks.pkl"):
-    #             os.remove("data/chunks.pkl")
-    #         st.rerun()
-
+    st.divider()
+    st.header("AI Answer (optional)")
+    groq_api_key = st.text_input(
+        "Groq API Key",
+        value=os.environ.get("GROQ_API_KEY", ""),
+        type="password",
+        help="Get a free key at console.groq.com. Leave blank to only see "
+             "raw retrieved snippets without a synthesized answer.",
+    )
 
     if st.session_state.indexed:
 
@@ -58,9 +50,13 @@ with st.sidebar:
 
             st.session_state.indexed = False
             st.session_state.chunks = []
+            st.session_state.index = None
 
-            # Remove saved FAISS files safely
+            # Remove the cloned repo and saved FAISS files safely
             try:
+                if st.session_state.clone_path and os.path.exists(st.session_state.clone_path):
+                    shutil.rmtree(st.session_state.clone_path, ignore_errors=True)
+
                 if os.path.exists("data/index.faiss"):
                     os.remove("data/index.faiss")
 
@@ -70,6 +66,7 @@ with st.sidebar:
             except Exception as e:
                 st.warning(f"Cleanup warning: {e}")
 
+            st.session_state.clone_path = None
             st.rerun()
 
 # ── Indexing Pipeline ─────────────────────────────────────────────────────────
@@ -81,20 +78,12 @@ if index_btn and repo_url:
 
             os.makedirs("data", exist_ok=True)
 
+            # Remove the previously cloned repo so disk usage doesn't grow
+            # unboundedly across repeated "Clone & Index" clicks.
+            if st.session_state.clone_path and os.path.exists(st.session_state.clone_path):
+                shutil.rmtree(st.session_state.clone_path, ignore_errors=True)
+
             clone_path = f"data/repo_{int(time.time())}"
-
-
-
-            # clone_path = "data/repo"
-
-            # # Ensure parent folder exists
-            # os.makedirs("data", exist_ok=True)
-
-            # # Remove old repo if present
-            # if os.path.exists(clone_path):
-            #     shutil.rmtree(clone_path)
-
-
 
             success, msg = clone_repo(repo_url, clone_path)
             if not success:
@@ -104,6 +93,13 @@ if index_btn and repo_url:
         with st.spinner("Step 2/5 — Reading code files..."):
             files = read_code_files(clone_path)
             st.sidebar.info(f"Found {len(files)} code files.")
+
+        if not files:
+            st.error(
+                "No supported code files were found in this repository. "
+                "Nothing to index."
+            )
+            st.stop()
 
         with st.spinner("Step 3/5 — Chunking code..."):
             chunks = chunk_files(files)
@@ -116,6 +112,8 @@ if index_btn and repo_url:
             index = build_index(embeddings)
             save_index(index, chunks)
             st.session_state.chunks = chunks
+            st.session_state.index = index
+            st.session_state.clone_path = clone_path
             st.session_state.indexed = True
 
         st.sidebar.success(" Repository indexed successfully!")
@@ -129,10 +127,26 @@ if st.session_state.indexed:
     top_k = st.slider("Number of results", 1, 10, 5)
 
     if st.button("🔎 Search", type="primary") and query:
-        index, chunks = load_index()
-        results = search_index(query, index, chunks, top_k=top_k)
+        results = search_index(
+            query, st.session_state.index, st.session_state.chunks, top_k=top_k
+        )
+
+        if results and groq_api_key:
+            st.subheader(" AI Answer")
+            with st.spinner("Synthesizing answer..."):
+                try:
+                    answer = synthesize_answer(query, results, groq_api_key)
+                    st.markdown(answer)
+                except Exception as e:
+                    st.warning(f"Couldn't generate an AI answer: {e}")
 
         st.subheader(" Results")
+        if not results:
+            st.warning(
+                "No relevant code found for this question in the indexed "
+                "repository. Try rephrasing, or the repo may not contain "
+                "anything matching this query."
+            )
         for i, res in enumerate(results, 1):
             with st.expander(
                 f"**#{i} — {res['file']}  (lines {res['start_line']}–{res['end_line']})**",
