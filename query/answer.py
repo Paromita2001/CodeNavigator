@@ -1,6 +1,16 @@
 from groq import Groq
 
 MODEL_NAME = "llama-3.3-70b-versatile"
+REWRITE_MODEL_NAME = "llama-3.1-8b-instant"
+
+REWRITE_SYSTEM_PROMPT = (
+    "You rewrite natural-language questions about a codebase into short, "
+    "keyword-dense phrases optimized for code search — the way a function's "
+    "docstring or summary comment would describe it, not a conversational "
+    "question. Output ONLY the rewritten phrase, nothing else.\n\n"
+    "Example: \"Where is authentication implemented?\" -> "
+    "\"JWT authentication middleware, verify token and authorize user\""
+)
 
 SYSTEM_PROMPT = (
     "You are a code navigation assistant. You are given a user's question "
@@ -11,6 +21,31 @@ SYSTEM_PROMPT = (
     "reference. If the snippets don't actually answer the question, say so "
     "plainly instead of guessing. Keep the answer concise."
 )
+
+
+def rewrite_query_for_search(query: str, api_key: str) -> str:
+    """
+    Rewrites a conversational question into a terse, code-search-style
+    phrase before embedding. The embedding model is trained on CodeSearchNet
+    (docstring-like queries), so conversational phrasing like "Where is X
+    implemented?" ranks worse than a keyword-dense rewrite. Falls back to
+    the original query on any failure.
+    """
+    try:
+        client = Groq(api_key=api_key)
+        completion = client.chat.completions.create(
+            model=REWRITE_MODEL_NAME,
+            messages=[
+                {"role": "system", "content": REWRITE_SYSTEM_PROMPT},
+                {"role": "user", "content": query},
+            ],
+            temperature=0,
+            max_tokens=60,
+        )
+        rewritten = completion.choices[0].message.content.strip()
+        return rewritten or query
+    except Exception:
+        return query
 
 
 def build_context(results: list[dict]) -> str:

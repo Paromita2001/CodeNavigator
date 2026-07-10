@@ -7,8 +7,8 @@ from ingestion.file_reader import read_code_files
 from indexing.chunker import chunk_files
 from indexing.embeddings import get_embeddings
 from indexing.vector_store import build_index, save_index
-from query.search import search_index
-from query.answer import synthesize_answer
+from query.search import search_index, LOW_CONFIDENCE_THRESHOLD
+from query.answer import synthesize_answer, rewrite_query_for_search
 
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(page_title="CodeNavigator", page_icon="🔍", layout="wide")
@@ -127,8 +127,16 @@ if st.session_state.indexed:
     top_k = st.slider("Number of results", 1, 10, 5)
 
     if st.button("🔎 Search", type="primary") and query:
+        # The embedding model is trained on terse, docstring-style code-search
+        # queries — conversational phrasing like "Where is X implemented?"
+        # ranks noticeably worse than a keyword-dense rewrite. Rewriting is
+        # only possible with a Groq key; without one, search on the raw query.
+        search_query = query
+        if groq_api_key:
+            search_query = rewrite_query_for_search(query, groq_api_key)
+
         results = search_index(
-            query, st.session_state.index, st.session_state.chunks, top_k=top_k
+            search_query, st.session_state.index, st.session_state.chunks, top_k=top_k
         )
 
         if results and groq_api_key:
@@ -143,9 +151,14 @@ if st.session_state.indexed:
         st.subheader(" Results")
         if not results:
             st.warning(
-                "No relevant code found for this question in the indexed "
-                "repository. Try rephrasing, or the repo may not contain "
-                "anything matching this query."
+                "No code was found in the indexed repository at all — "
+                "did indexing complete successfully?"
+            )
+        elif results[0]["score"] < LOW_CONFIDENCE_THRESHOLD:
+            st.warning(
+                "These results scored low — the repo may not actually "
+                "contain anything matching this query. Treat them as "
+                "guesses, not confirmed answers."
             )
         for i, res in enumerate(results, 1):
             with st.expander(
